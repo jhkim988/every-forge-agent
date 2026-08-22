@@ -1,0 +1,93 @@
+﻿name: Release Multi-Platform Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows
+            arch: amd64
+            agent_bin: every-forge-agent-win64.exe
+            echo_bin: every-forge-echo-win64.exe
+          - os: darwin
+            arch: arm64
+            agent_bin: every-forge-agent-darwin-arm64
+            echo_bin: every-forge-echo-darwin-arm64
+          - os: darwin
+            arch: amd64
+            agent_bin: every-forge-agent-darwin-amd64
+            echo_bin: every-forge-echo-darwin-amd64
+          - os: linux
+            arch: amd64
+            agent_bin: every-forge-agent-linux-amd64
+            echo_bin: every-forge-echo-linux-amd64
+          - os: linux
+            arch: arm64
+            agent_bin: every-forge-agent-linux-arm64
+            echo_bin: every-forge-echo-linux-arm64
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          check-latest: true
+
+      - name: Build Agent Binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o dist/${{ matrix.agent_bin }} .
+
+      - name: Build Echo Server Binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o dist/${{ matrix.echo_bin }} ./cmd/echo-server
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+
+  create-release:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-binaries
+
+      - name: Flatten Artifacts
+        run: |
+          mkdir -p release-assets
+          find all-binaries -type f -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
