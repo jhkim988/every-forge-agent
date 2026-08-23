@@ -277,3 +277,30 @@ func TestLocalAgentServer(t *testing.T) {
 		}
 	})
 }
+func TestHealthEndpointDoesNotExposeToken(t *testing.T) {
+	agent := NewAgentServer("super-secret-token", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/health", nil)
+	if err != nil {
+		t.Fatalf("Failed to create health request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Health request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var data map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("Failed to decode health response: %v", err)
+	}
+	if tokenVal, ok := data["token"]; ok && tokenVal != "" {
+		t.Errorf("Health endpoint should not expose token, got %v", tokenVal)
+	}
+}

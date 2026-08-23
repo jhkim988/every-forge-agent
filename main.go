@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"crypto/rand"
+	"encoding/hex"
 )
 
 type AgentServer struct {
@@ -20,6 +22,13 @@ type AgentServer struct {
 }
 
 func NewAgentServer(token string, devMode bool) *AgentServer {
+	if token == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			panic("failed to generate random token: " + err.Error())
+		}
+		token = hex.EncodeToString(b)
+	}
 	return &AgentServer{Token: token, DevMode: devMode}
 }
 
@@ -111,15 +120,20 @@ func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	data := map[string]interface{}{
 		"status":    "running",
 		"agent":     "every-forge-agent",
 		"version":   "1.0.0",
 		"os":        runtime.GOOS,
 		"arch":      runtime.GOARCH,
-		"token":     a.Token,
 		"timestamp": time.Now().Unix(),
-	})
+	}
+	if a.DevMode {
+		// In dev mode, we can optionally show the token for debugging, but it's a security risk.
+		// For safety, we omit it in all modes.
+		// data["token"] = a.Token
+	}
+	json.NewEncoder(w).Encode(data)
 }
 
 type ProxyRequest struct {
