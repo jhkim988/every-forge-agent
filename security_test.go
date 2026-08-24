@@ -18,16 +18,16 @@ func TestValidatePid(t *testing.T) {
 	}{
 		{"1", true},
 		{"42", true},
-		{"4194304", true},   // 2^22, macOS pid_max upper bound
-		{"0", false},        // process group of caller
-		{"-1", false},       // signal broadcast
+		{"4194304", true}, // 2^22, macOS pid_max upper bound
+		{"0", false},      // process group of caller
+		{"-1", false},     // signal broadcast
 		{"-42", false},
-		{"4194305", false},  // above pid_max
+		{"4194305", false}, // above pid_max
 		{"99999999999999", false},
 		{"abc", false},
 		{"12x", false},
 		{"", false},
-		{" 12 ", false},     // whitespace must not slip through
+		{" 12 ", false}, // whitespace must not slip through
 	}
 	for _, c := range cases {
 		got := validatePid(c.in)
@@ -209,7 +209,6 @@ func TestAuthRejectsWrongToken(t *testing.T) {
 		}
 	}
 }
-
 
 func TestEmptyTokenFailsClosed(t *testing.T) {
 	agent := &AgentServer{} // zero value: no token configured
