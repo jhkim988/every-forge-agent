@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -147,7 +148,68 @@ func TestLoopbackHostVariantsAccepted(t *testing.T) {
 	}
 }
 
-// --- A4: no-token construction must fail closed on protected endpoints ---
+// --- Egress guard: cloud metadata endpoints must never be proxied ---
+
+func TestProxyBlocksCloudMetadataEgress(t *testing.T) {
+	agent := NewAgentServer("tok", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	for _, target := range []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[fd00:ec2::254]/latest/meta-data/",
+		"http://100.100.100.200/v1/meta",
+	} {
+		payload := []byte(`{"url":"` + target + `","method":"GET"}`)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader(payload))
+		req.Header.Set("X-EF-Token", "tok")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request for %s failed: %v", target, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("Expected 403 for cloud metadata target %s, got %d", target, resp.StatusCode)
+		}
+	}
+
+	// Normal intranet/loopback targets must remain allowed (core use case).
+	payloadOK := []byte(`{"url":"http://127.0.0.1:59998/anything","method":"GET"}`)
+	reqOK, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader(payloadOK))
+	reqOK.Header.Set("X-EF-Token", "tok")
+	respOK, err := http.DefaultClient.Do(reqOK)
+	if err != nil {
+		t.Fatalf("loopback proxy request failed: %v", err)
+	}
+	respOK.Body.Close()
+	if respOK.StatusCode == http.StatusForbidden {
+		t.Errorf("Loopback targets must not be blocked by the egress guard")
+	}
+}
+
+// --- Token comparison must be constant-time ---
+
+func TestAuthRejectsWrongToken(t *testing.T) {
+	agent := NewAgentServer("correct-horse-battery-staple", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	for _, tok := range []string{"", "x", "correct-horse-battery-stapl", "correct-horse-battery-stapleX"} {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
+		if tok != "" {
+			req.Header.Set("X-EF-Token", tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("Expected 401 for token %q, got %d", tok, resp.StatusCode)
+		}
+	}
+}
+
 
 func TestEmptyTokenFailsClosed(t *testing.T) {
 	agent := &AgentServer{} // zero value: no token configured
