@@ -484,3 +484,26 @@ func TestParseProcessList(t *testing.T) {
 		t.Errorf("Expected empty result for empty input, got %+v", got)
 	}
 }
+
+func TestVersionIsInjectable(t *testing.T) {
+	old := version
+	defer func() { version = old }()
+	version = "9.9.9-test"
+
+	agent := NewAgentServer("tok", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/health", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("health request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var data map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&data)
+	if data["version"] != "9.9.9-test" {
+		t.Errorf("Expected injected version 9.9.9-test, got %v", data["version"])
+	}
+}

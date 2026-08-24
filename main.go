@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -134,7 +138,7 @@ func (a *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"status":    "running",
 		"agent":     "every-forge-agent",
-		"version":   "1.0.0",
+		"version":   version,
 		"os":        runtime.GOOS,
 		"arch":      runtime.GOARCH,
 		"timestamp": time.Now().Unix(),
@@ -155,6 +159,9 @@ type ProxyRequest struct {
 }
 
 const maxProxyResponseBytes = 10 << 20 // 10 MB cap on proxied response bodies
+
+// version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".
+var version = "1.0.0"
 
 func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -416,7 +423,21 @@ func main() {
 		WriteTimeout: 35 * time.Second,
 	}
 
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Agent server error: %v", err)
+	// Graceful shutdown on SIGINT/SIGTERM
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Agent server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	fmt.Println("\n  Shutting down gracefully...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown error: %v", err)
 	}
 }
