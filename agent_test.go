@@ -308,6 +308,33 @@ func TestLocalAgentServer(t *testing.T) {
 		if respKillInvalid.StatusCode != http.StatusInternalServerError {
 			t.Errorf("Expected 500 for non-existent PID kill, got %d", respKillInvalid.StatusCode)
 		}
+
+		// Process Kill: Non-numeric PID must be rejected with 400 BEFORE reaching the OS.
+		// Uses a harmless non-numeric value; dangerous values (-1) must never be executed.
+		reqKillAlpha, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/process/kill?pid=abc", nil)
+		reqKillAlpha.Header.Set("X-EF-Token", "test-secret-token")
+		respKillAlpha, err := http.DefaultClient.Do(reqKillAlpha)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer respKillAlpha.Body.Close()
+		if respKillAlpha.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 Bad Request for non-numeric pid 'abc', got %d", respKillAlpha.StatusCode)
+		}
+
+		// Process Kill: negative and out-of-range PIDs must be rejected with 400
+		for _, badPid := range []string{"0", "-1"} {
+			reqBad, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/process/kill?pid="+badPid, nil)
+			reqBad.Header.Set("X-EF-Token", "test-secret-token")
+			respBad, err := http.DefaultClient.Do(reqBad)
+			if err != nil {
+				t.Fatalf("request failed for pid %s: %v", badPid, err)
+			}
+			respBad.Body.Close()
+			if respBad.StatusCode != http.StatusBadRequest {
+				t.Errorf("Expected 400 for pid %s, got %d", badPid, respBad.StatusCode)
+			}
+		}
 	})
 }
 func TestHealthEndpointDoesNotExposeToken(t *testing.T) {

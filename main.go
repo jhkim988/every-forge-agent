@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"crypto/rand"
@@ -244,6 +245,21 @@ func (a *AgentServer) handleProcessKill(w http.ResponseWriter, r *http.Request) 
 	pid := r.URL.Query().Get("pid")
 	if pid == "" {
 		http.Error(w, "Missing pid parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Validate PID strictly: must be a positive integer within OS pid_t range.
+	// This blocks dangerous values such as -1 (signal broadcast on Unix) and 0
+	// (process group of the caller) before they ever reach the OS.
+	pidNum, err := strconv.Atoi(pid)
+	if err != nil || pidNum <= 0 || pidNum > 4194304 { // 4194304 = 2^22, default macOS pid_max
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "error",
+			"error":  "invalid pid: must be a positive integer",
+			"pid":    pid,
+		})
 		return
 	}
 
