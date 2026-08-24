@@ -91,6 +91,8 @@ func TestValidLoopbackHost(t *testing.T) {
 		{"evil.com", false},
 		{"attacker.local:9921", false},
 		{"localhost.evil.com:9921", false},
+		{"localhost.", false}, // trailing-dot FQDN form: intentionally rejected (fail-closed; browsers don't send it)
+		{"127.0.0.1.", false},
 		{"", true}, // HTTP/1.0-style omission tolerated
 	}
 	for _, c := range cases {
