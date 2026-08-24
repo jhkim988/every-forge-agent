@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,33 +43,81 @@ func (a *AgentServer) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Public Health Check
-	mux.HandleFunc("/api/health", a.corsMiddleware(a.handleHealth))
+	mux.HandleFunc("/api/health", a.hostMiddleware(a.corsMiddleware(a.handleHealth)))
 
 	// Protected Endpoints (Require X-EF-Token or Bearer Token)
-	mux.HandleFunc("/api/proxy", a.corsMiddleware(a.authMiddleware(a.handleProxy)))
-	mux.HandleFunc("/api/process/list", a.corsMiddleware(a.authMiddleware(a.handleProcessList)))
-	mux.HandleFunc("/api/process/kill", a.corsMiddleware(a.authMiddleware(a.handleProcessKill)))
+	mux.HandleFunc("/api/proxy", a.hostMiddleware(a.corsMiddleware(a.authMiddleware(a.handleProxy))))
+	mux.HandleFunc("/api/process/list", a.hostMiddleware(a.corsMiddleware(a.authMiddleware(a.handleProcessList))))
+	mux.HandleFunc("/api/process/kill", a.hostMiddleware(a.corsMiddleware(a.authMiddleware(a.handleProcessKill))))
 
 	return mux
+}
+
+// hostMiddleware rejects requests whose Host header does not target the local
+// loopback, defending against DNS-rebinding attacks where a public hostname
+// resolves to 127.0.0.1.
+func (a *AgentServer) hostMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !validLoopbackHost(r.Host) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "host not allowed: agent only accepts loopback Host headers",
+			})
+			return
+		}
+		next(w, r)
+	}
 }
 
 func isAllowedOrigin(origin string, isDev bool) bool {
 	if origin == "" {
 		return true
 	}
-	// Always allow production official domains
-	if origin == "https://every-forge.com" || origin == "https://www.every-forge.com" {
+	u, err := url.Parse(origin)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+
+	// Always allow production official domains (exact host match)
+	if host == "every-forge.com" || host == "www.every-forge.com" {
 		return true
 	}
-	// Allow localhost and local loopback in development / dev flag or local ports
-	if strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1") {
+	// Allow local loopback hosts only (exact match; blocks look-alikes such as
+	// localhost.evil.com or 127.0.0.1.attacker.io)
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return true
 	}
-	// In dev mode, allow any local subdomains or vercel preview deployments
-	if isDev && (strings.HasSuffix(origin, ".every-forge.com") || strings.HasSuffix(origin, ".vercel.app")) {
+	// In dev mode, allow preview deployments (exact host match on known suffixes)
+	if isDev && (strings.HasSuffix(host, ".every-forge.com") || strings.HasSuffix(host, ".vercel.app")) {
 		return true
 	}
 	return false
+}
+
+// validLoopbackHost reports whether the Host header targets the local loopback.
+// This is a DNS-rebinding defense: a public hostname resolving to 127.0.0.1 must
+// not reach the agent, even though the connection itself arrives from loopback.
+func validLoopbackHost(hostHeader string) bool {
+	if hostHeader == "" {
+		// Tolerate HTTP/1.0-style requests without a Host header.
+		return true
+	}
+	h := strings.ToLower(hostHeader)
+	if i := strings.LastIndex(h, ":"); i != -1 && !strings.Contains(h[i:], "]") {
+		h = h[:i] // strip port (careful with IPv6 brackets)
+	}
+	h = strings.Trim(h, "[]")
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// validatePid reports whether pid is a positive integer within OS pid_t range.
+// This blocks dangerous values such as -1 (signal broadcast on Unix) and 0
+// (process group of the caller) before they ever reach the OS.
+func validatePid(pid string) bool {
+	pidNum, err := strconv.Atoi(pid)
+	return err == nil && pidNum > 0 && pidNum <= 4194304 // 4194304 = 2^22, default macOS pid_max
 }
 
 func (a *AgentServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -106,9 +155,15 @@ func (a *AgentServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// If no token was configured by flag, allow seamless zero-config local loopback usage
+		// Fail closed when no token is configured: an agent without a token must
+		// never serve protected endpoints (defense against future refactoring
+		// reintroducing a tokenless mode).
 		if a.Token == "" {
-			next(w, r)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "agent has no security token configured; refusing to serve protected endpoints",
+			})
 			return
 		}
 
@@ -344,8 +399,7 @@ func (a *AgentServer) handleProcessKill(w http.ResponseWriter, r *http.Request) 
 	// Validate PID strictly: must be a positive integer within OS pid_t range.
 	// This blocks dangerous values such as -1 (signal broadcast on Unix) and 0
 	// (process group of the caller) before they ever reach the OS.
-	pidNum, err := strconv.Atoi(pid)
-	if err != nil || pidNum <= 0 || pidNum > 4194304 { // 4194304 = 2^22, default macOS pid_max
+	if !validatePid(pid) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{

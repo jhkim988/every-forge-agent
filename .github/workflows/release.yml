@@ -52,7 +52,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w" -o dist/${{ matrix.agent_bin }} .
+          go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/${{ matrix.agent_bin }} .
 
       - name: Build Echo Server Binary
         env:
@@ -81,6 +81,9 @@ jobs:
         run: |
           mkdir -p release-assets
           find all-binaries -type f -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum * > checksums.txt
+          cd ..
           ls -la release-assets
 
       - name: Publish GitHub Release
