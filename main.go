@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -120,6 +121,29 @@ func validatePid(pid string) bool {
 	return err == nil && pidNum > 0 && pidNum <= 4194304 // 4194304 = 2^22, default macOS pid_max
 }
 
+// blockedMetadataHosts are cloud instance metadata endpoints (AWS/GCP/Azure/
+// Alibaba). A paired browser page tricked into proxying these could harvest
+// instance credentials; intranet testing (the agent's purpose) never needs
+// them. Only exact IP-literal hosts are blocked — private LAN ranges stay
+// reachable because intranet testing is the core use case.
+var blockedMetadataHosts = map[string]bool{
+	"169.254.169.254": true, // AWS / GCP / Azure / OpenStack
+	"fd00:ec2::254":   true, // GCP IPv6 metadata
+	"100.100.100.200": true, // Alibaba Cloud
+}
+
+func isBlockedProxyTarget(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false // let http.NewRequest produce the proper client error
+	}
+	host := strings.ToLower(u.Hostname())
+	if i := strings.LastIndex(host, ":"); i != -1 && strings.Contains(host, ":") {
+		_ = i // IPv6 hostnames arrive bracket-free from url.Parse Hostname()
+	}
+	return blockedMetadataHosts[host]
+}
+
 func (a *AgentServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -175,7 +199,7 @@ func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		if token != a.Token {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -233,6 +257,17 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	method := strings.ToUpper(reqData.Method)
 	if method == "" {
 		method = "GET"
+	}
+
+	// Egress guard: never proxy to cloud instance metadata endpoints.
+	if isBlockedProxyTarget(reqData.URL) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     "target URL is blocked (cloud metadata endpoints are not proxyable)",
+			"targetURL": reqData.URL,
+		})
+		return
 	}
 
 	// Do not follow redirects: surface the raw redirect back to the caller so
