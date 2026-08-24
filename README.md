@@ -22,29 +22,29 @@ Ultra-lightweight, zero-dependency local bridge daemon designed for [Every-Forge
 
 ### 1. Windows (PowerShell 1-Click)
 Run in PowerShell (bypasses SmartScreen/MOTW without popups):
-\\\powershell
-irm https://github.com/jhkim988/every-forge-agent/releases/latest/download/every-forge-agent-win64.exe -OutFile "C:\Users\Kim_Jin_Han\every-forge-agent.exe" ; Unblock-File "C:\Users\Kim_Jin_Han\every-forge-agent.exe" ; & "C:\Users\Kim_Jin_Han\every-forge-agent.exe"
-\\\
+```powershell
+irm https://github.com/jhkim988/every-forge-agent/releases/latest/download/every-forge-agent-win64.exe -OutFile "$env:USERPROFILE\every-forge-agent.exe" ; Unblock-File "$env:USERPROFILE\every-forge-agent.exe" ; & "$env:USERPROFILE\every-forge-agent.exe"
+```
 
 ### 2. macOS (Apple Silicon / Intel)
-\\\ash
+```bash
 curl -fsSL https://github.com/jhkim988/every-forge-agent/releases/latest/download/every-forge-agent-darwin-arm64 -o ~/every-forge-agent
 chmod +x ~/every-forge-agent
 ~/every-forge-agent
-\\\
+```
 
 ### 3. Linux (x86_64 / ARM64)
-\\\ash
+```bash
 curl -fsSL https://github.com/jhkim988/every-forge-agent/releases/latest/download/every-forge-agent-linux-amd64 -o ~/every-forge-agent
 chmod +x ~/every-forge-agent
 ~/every-forge-agent
-\\\
+```
 
 ### 4. Install via Go (Developers)
-\\\ash
+```bash
 go install github.com/jhkim988/every-forge-agent@latest
 every-forge-agent
-\\\
+```
 
 ---
 
@@ -52,10 +52,10 @@ every-forge-agent
 
 ### HTTP Echo Server (\:9922\)
 A lightweight, fully permissive CORS HTTP echo server for testing payloads, headers, query params, and HTTP methods:
-\\\ash
+```bash
 # Run standalone
 go run ./cmd/echo-server
-\\\
+```
 
 ---
 
@@ -69,3 +69,21 @@ go run ./cmd/echo-server
 
 ## 📄 License
 MIT License © 2026 Every-Forge Team.
+
+## 🔌 Pairing Protocol
+
+The web app at every-forge.com communicates with this agent over `http://127.0.0.1:9921`.
+
+1. Start the agent — it prints a random 32-char security token in the console.
+2. Paste that token into the agent pairing UI on every-forge.com.
+3. The site stores the token locally and sends it as `X-EF-Token` (or `Authorization: Bearer`) on every call.
+
+### Endpoints
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/health` | none | Liveness, version, OS/arch info |
+| `POST /api/proxy` | token | Server-side HTTP request from your machine (response capped at 10 MB, redirects are NOT followed) |
+| `GET /api/process/list` | token | Structured process list (`processes[]`) + raw output |
+| `POST /api/process/kill?pid=` | token | Kill process by numeric PID (validated: positive integer only) |
+
+Security: loopback binding only, strict origin whitelist (403 otherwise), random per-run token.

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          check-latest: true
+
+      - name: Lint (go vet)
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1 -v
+
+      - name: Build All Binaries
+        run: |
+          go build -o dist/every-forge-agent .
+          go build -o dist/every-forge-echo ./cmd/echo-server
