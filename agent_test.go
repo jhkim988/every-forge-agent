@@ -367,6 +367,65 @@ func TestForbiddenOriginRejected(t *testing.T) {
 	}
 }
 
+func TestProxySafetyLimits(t *testing.T) {
+	agent := &AgentServer{Token: "tok", MaxProxyBytes: 1 << 20} // 1 MB cap for test
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	// 1. Oversized response body must be rejected, not buffered into memory
+	big := make([]byte, 2<<20) // 2 MB > injected 1 MB cap
+	for i := range big {
+		big[i] = 'x'
+	}
+	targetBig := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(big)
+	}))
+	defer targetBig.Close()
+
+	payloadBig, _ := json.Marshal(ProxyRequest{URL: targetBig.URL, Method: "GET"})
+	reqBig, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader(payloadBig))
+	reqBig.Header.Set("X-EF-Token", "tok")
+	respBig, err := http.DefaultClient.Do(reqBig)
+	if err != nil {
+		t.Fatalf("big proxy request failed: %v", err)
+	}
+	var bigData map[string]interface{}
+	json.NewDecoder(respBig.Body).Decode(&bigData)
+	respBig.Body.Close()
+	if respBig.StatusCode != http.StatusBadGateway {
+		t.Errorf("Expected 502 for oversized proxied response, got %d", respBig.StatusCode)
+	}
+	if bigData["error"] == nil || !strings.Contains(bigData["error"].(string), "too large") {
+		t.Errorf("Expected 'too large' error message, got %v", bigData["error"])
+	}
+
+	// 2. Redirects must NOT be followed: the raw 302 is surfaced back
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("final destination"))
+	}))
+	defer redirectTarget.Close()
+
+	targetRedirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	defer targetRedirect.Close()
+
+	payloadRedir, _ := json.Marshal(ProxyRequest{URL: targetRedirect.URL, Method: "GET"})
+	reqRedir, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader(payloadRedir))
+	reqRedir.Header.Set("X-EF-Token", "tok")
+	respRedir, err := http.DefaultClient.Do(reqRedir)
+	if err != nil {
+		t.Fatalf("redirect proxy request failed: %v", err)
+	}
+	var redirData map[string]interface{}
+	json.NewDecoder(respRedir.Body).Decode(&redirData)
+	respRedir.Body.Close()
+	if redirData["statusCode"].(float64) != float64(http.StatusFound) {
+		t.Errorf("Expected raw 302 to be returned (not followed), got %v", redirData["statusCode"])
+	}
+}
+
 func TestHealthEndpointDoesNotExposeToken(t *testing.T) {
 	agent := NewAgentServer("super-secret-token", false)
 	ts := httptest.NewServer(agent.Routes())

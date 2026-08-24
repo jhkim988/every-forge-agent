@@ -18,8 +18,9 @@ import (
 )
 
 type AgentServer struct {
-	Token   string
-	DevMode bool
+	Token         string
+	DevMode       bool
+	MaxProxyBytes int64 // proxy response cap; 0 => default (maxProxyResponseBytes)
 }
 
 func NewAgentServer(token string, devMode bool) *AgentServer {
@@ -153,6 +154,8 @@ type ProxyRequest struct {
 	Body    string            `json:"body"`
 }
 
+const maxProxyResponseBytes = 10 << 20 // 10 MB cap on proxied response bodies
+
 func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -170,6 +173,15 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		method = "GET"
 	}
 
+	// Do not follow redirects: surface the raw redirect back to the caller so
+	// forwarded headers and credentials never leak to an unvalidated Location.
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
 	var bodyReader io.Reader
 	if reqData.Body != "" {
 		bodyReader = strings.NewReader(reqData.Body)
@@ -185,7 +197,6 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		outReq.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(outReq)
 	duration := time.Since(start).Milliseconds()
@@ -202,7 +213,23 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	// Cap buffered response size to protect the agent from OOM on huge targets.
+	limit := int64(maxProxyResponseBytes)
+	if a.MaxProxyBytes > 0 {
+		limit = a.MaxProxyBytes
+	}
+	respBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if readErr == nil && int64(len(respBytes)) > limit {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      fmt.Sprintf("response body too large (limit %d bytes)", limit),
+			"durationMs": duration,
+			"targetURL":  reqData.URL,
+		})
+		return
+	}
+
 	respHeaders := make(map[string]string)
 	for k, v := range resp.Header {
 		respHeaders[k] = strings.Join(v, ", ")
