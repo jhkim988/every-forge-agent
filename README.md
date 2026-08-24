@@ -100,3 +100,12 @@ Security: loopback binding only, strict origin whitelist (403 otherwise), random
    or `Authorization: Bearer`; an agent without a configured token refuses them.
 4. **PID validation** — `/api/process/kill?pid=` accepts positive integers within
    OS pid range only (`-1`, `0`, out-of-range → 400 before reaching the OS).
+
+### Known Browser Limitations
+
+- **Safari**: an HTTPS page (every-forge.com) cannot call the agent's
+  `http://127.0.0.1` endpoints — Safari blocks this as mixed content with no
+  per-site override. Use Chrome, Edge, or Firefox for pairing and agent-backed
+  tools; the header badge will simply show *Offline* in Safari.
+- Host headers carrying a trailing-dot FQDN (`localhost.`) are rejected
+  fail-closed; browsers do not send that form.
