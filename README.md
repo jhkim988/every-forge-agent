@@ -87,3 +87,16 @@ The web app at every-forge.com communicates with this agent over `http://127.0.0
 | `POST /api/process/kill?pid=` | token | Kill process by numeric PID (validated: positive integer only) |
 
 Security: loopback binding only, strict origin whitelist (403 otherwise), random per-run token.
+
+### Request Hardening (defense in depth)
+
+1. **Loopback Host validation** — every request's `Host` header must target
+   `localhost` / `127.0.0.1` / `[::1]` (any port). Public hostnames resolving to
+   127.0.0.1 (DNS rebinding) are rejected with 403.
+2. **Exact origin matching** — the CORS whitelist compares parsed hostnames, so
+   look-alikes such as `http://localhost.evil.com` or
+   `https://every-forge.com.evil.com` are rejected (403).
+3. **Fail-closed token auth** — protected endpoints require a valid `X-EF-Token`
+   or `Authorization: Bearer`; an agent without a configured token refuses them.
+4. **PID validation** — `/api/process/kill?pid=` accepts positive integers within
+   OS pid range only (`-1`, `0`, out-of-range → 400 before reaching the OS).
