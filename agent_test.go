@@ -304,9 +304,10 @@ func TestLocalAgentServer(t *testing.T) {
 			t.Fatalf("request failed: %v", err)
 		}
 		defer respKillInvalid.Body.Close()
-		// Non-existent PID returns 500 error on OS taskkill/kill failure
-		if respKillInvalid.StatusCode != http.StatusInternalServerError {
-			t.Errorf("Expected 500 for non-existent PID kill, got %d", respKillInvalid.StatusCode)
+		// Out-of-range PID (exceeds pid_max) is rejected by validation with 400,
+		// never forwarded to the OS.
+		if respKillInvalid.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 for out-of-range PID kill, got %d", respKillInvalid.StatusCode)
 		}
 
 		// Process Kill: Non-numeric PID must be rejected with 400 BEFORE reaching the OS.
