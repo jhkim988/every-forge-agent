@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -100,7 +102,7 @@ func TestLocalAgentServer(t *testing.T) {
 			t.Errorf("Expected Allow-Credentials true, got %s", resp.Header.Get("Access-Control-Allow-Credentials"))
 		}
 
-		// Fallback origin for non-whitelisted external domain
+		// Non-whitelisted external domain is rejected outright with 403
 		reqOther, _ := http.NewRequest(http.MethodOptions, ts.URL+"/api/health", nil)
 		reqOther.Header.Set("Origin", "https://external-domain.com")
 		respOther, err := http.DefaultClient.Do(reqOther)
@@ -108,8 +110,8 @@ func TestLocalAgentServer(t *testing.T) {
 			t.Fatalf("OPTIONS request for external origin failed: %v", err)
 		}
 		defer respOther.Body.Close()
-		if respOther.Header.Get("Access-Control-Allow-Origin") != "https://every-forge.com" {
-			t.Errorf("Expected fallback origin https://every-forge.com, got %s", respOther.Header.Get("Access-Control-Allow-Origin"))
+		if respOther.StatusCode != http.StatusForbidden {
+			t.Errorf("Expected 403 for external origin, got %d", respOther.StatusCode)
 		}
 	})
 
@@ -338,6 +340,33 @@ func TestLocalAgentServer(t *testing.T) {
 		}
 	})
 }
+
+func TestForbiddenOriginRejected(t *testing.T) {
+	agent := NewAgentServer("tok", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	for _, path := range []string{"/api/health", "/api/proxy"} {
+		method := http.MethodGet
+		if path == "/api/proxy" {
+			method = http.MethodPost
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader("{}"))
+		req.Header.Set("Origin", "https://evil.example")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request to %s failed: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		_ = body
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("Expected 403 for evil origin on %s, got %d", path, resp.StatusCode)
+		}
+	}
+}
+
 func TestHealthEndpointDoesNotExposeToken(t *testing.T) {
 	agent := NewAgentServer("super-secret-token", false)
 	ts := httptest.NewServer(agent.Routes())

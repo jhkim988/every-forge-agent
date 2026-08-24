@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,8 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"crypto/rand"
-	"encoding/hex"
 )
 
 type AgentServer struct {
@@ -69,11 +69,20 @@ func isAllowedOrigin(origin string, isDev bool) bool {
 func (a *AgentServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		
-		if isAllowedOrigin(origin, a.DevMode) {
+
+		if !isAllowedOrigin(origin, a.DevMode) {
+			// Defense in depth: requests from non-whitelisted origins are rejected
+			// outright instead of being processed with neutralized CORS headers.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "origin not allowed",
+			})
+			return
+		}
+
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "https://every-forge.com")
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -110,8 +119,8 @@ func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "Unauthorized. Missing or invalid X-EF-Token header.",
-				"hint":    "Pair this browser session using the token printed in your local-agent console.",
+				"error": "Unauthorized. Missing or invalid X-EF-Token header.",
+				"hint":  "Pair this browser session using the token printed in your local-agent console.",
 			})
 			return
 		}
@@ -185,9 +194,9 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":        err.Error(),
-			"durationMs":   duration,
-			"targetURL":    reqData.URL,
+			"error":      err.Error(),
+			"durationMs": duration,
+			"targetURL":  reqData.URL,
 		})
 		return
 	}
