@@ -103,7 +103,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// Fallback origin for non-whitelisted external domain
 		reqOther, _ := http.NewRequest(http.MethodOptions, ts.URL+"/api/health", nil)
 		reqOther.Header.Set("Origin", "https://external-domain.com")
-		respOther, _ := http.DefaultClient.Do(reqOther)
+		respOther, err := http.DefaultClient.Do(reqOther)
+		if err != nil {
+			t.Fatalf("OPTIONS request for external origin failed: %v", err)
+		}
 		defer respOther.Body.Close()
 		if respOther.Header.Get("Access-Control-Allow-Origin") != "https://every-forge.com" {
 			t.Errorf("Expected fallback origin https://every-forge.com, got %s", respOther.Header.Get("Access-Control-Allow-Origin"))
@@ -113,7 +116,10 @@ func TestLocalAgentServer(t *testing.T) {
 	t.Run("Authentication Guard", func(t *testing.T) {
 		// 1. Missing token
 		req1, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
-		resp1, _ := http.DefaultClient.Do(req1)
+		resp1, err := http.DefaultClient.Do(req1)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer resp1.Body.Close()
 		if resp1.StatusCode != http.StatusUnauthorized {
 			t.Errorf("Expected 401 Unauthorized for missing token, got %d", resp1.StatusCode)
@@ -122,7 +128,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// 2. Invalid X-EF-Token
 		req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
 		req2.Header.Set("X-EF-Token", "wrong-token-abc")
-		resp2, _ := http.DefaultClient.Do(req2)
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer resp2.Body.Close()
 		if resp2.StatusCode != http.StatusUnauthorized {
 			t.Errorf("Expected 401 Unauthorized for invalid X-EF-Token, got %d", resp2.StatusCode)
@@ -131,7 +140,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// 3. Valid X-EF-Token
 		req3, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
 		req3.Header.Set("X-EF-Token", "test-secret-token")
-		resp3, _ := http.DefaultClient.Do(req3)
+		resp3, err := http.DefaultClient.Do(req3)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer resp3.Body.Close()
 		if resp3.StatusCode != http.StatusOK {
 			t.Errorf("Expected 200 OK for valid X-EF-Token, got %d", resp3.StatusCode)
@@ -140,7 +152,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// 4. Valid Bearer Token in Authorization header
 		req4, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
 		req4.Header.Set("Authorization", "Bearer test-secret-token")
-		resp4, _ := http.DefaultClient.Do(req4)
+		resp4, err := http.DefaultClient.Do(req4)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer resp4.Body.Close()
 		if resp4.StatusCode != http.StatusOK {
 			t.Errorf("Expected 200 OK for valid Bearer token, got %d", resp4.StatusCode)
@@ -149,7 +164,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// 5. Invalid Bearer Token in Authorization header
 		req5, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/process/list", nil)
 		req5.Header.Set("Authorization", "Bearer invalid-token")
-		resp5, _ := http.DefaultClient.Do(req5)
+		resp5, err := http.DefaultClient.Do(req5)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer resp5.Body.Close()
 		if resp5.StatusCode != http.StatusUnauthorized {
 			t.Errorf("Expected 401 Unauthorized for invalid Bearer token, got %d", resp5.StatusCode)
@@ -206,7 +224,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// 2. Proxy request with non-POST method on /api/proxy endpoint
 		reqGet, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/proxy", nil)
 		reqGet.Header.Set("X-EF-Token", "test-secret-token")
-		respGet, _ := http.DefaultClient.Do(reqGet)
+		respGet, err := http.DefaultClient.Do(reqGet)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer respGet.Body.Close()
 		if respGet.StatusCode != http.StatusMethodNotAllowed {
 			t.Errorf("Expected 405 Method Not Allowed for GET /api/proxy, got %d", respGet.StatusCode)
@@ -216,7 +237,10 @@ func TestLocalAgentServer(t *testing.T) {
 		reqBadJson, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader([]byte("{invalid-json")))
 		reqBadJson.Header.Set("Content-Type", "application/json")
 		reqBadJson.Header.Set("X-EF-Token", "test-secret-token")
-		respBadJson, _ := http.DefaultClient.Do(reqBadJson)
+		respBadJson, err := http.DefaultClient.Do(reqBadJson)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer respBadJson.Body.Close()
 		if respBadJson.StatusCode != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for malformed JSON, got %d", respBadJson.StatusCode)
@@ -231,7 +255,10 @@ func TestLocalAgentServer(t *testing.T) {
 		reqUnreach, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", bytes.NewReader(unreachableBytes))
 		reqUnreach.Header.Set("Content-Type", "application/json")
 		reqUnreach.Header.Set("X-EF-Token", "test-secret-token")
-		respUnreach, _ := http.DefaultClient.Do(reqUnreach)
+		respUnreach, err := http.DefaultClient.Do(reqUnreach)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer respUnreach.Body.Close()
 		if respUnreach.StatusCode != http.StatusBadGateway {
 			t.Errorf("Expected 502 Bad Gateway for unreachable target, got %d", respUnreach.StatusCode)
@@ -260,7 +287,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// Process Kill: Missing PID parameter returns 400
 		reqKillNoPid, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/process/kill", nil)
 		reqKillNoPid.Header.Set("X-EF-Token", "test-secret-token")
-		respKillNoPid, _ := http.DefaultClient.Do(reqKillNoPid)
+		respKillNoPid, err := http.DefaultClient.Do(reqKillNoPid)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer respKillNoPid.Body.Close()
 		if respKillNoPid.StatusCode != http.StatusBadRequest {
 			t.Errorf("Expected 400 Bad Request for missing pid, got %d", respKillNoPid.StatusCode)
@@ -269,7 +299,10 @@ func TestLocalAgentServer(t *testing.T) {
 		// Process Kill: Invalid PID execution handles error cleanly
 		reqKillInvalid, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/process/kill?pid=99999999", nil)
 		reqKillInvalid.Header.Set("X-EF-Token", "test-secret-token")
-		respKillInvalid, _ := http.DefaultClient.Do(reqKillInvalid)
+		respKillInvalid, err := http.DefaultClient.Do(reqKillInvalid)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
 		defer respKillInvalid.Body.Close()
 		// Non-existent PID returns 500 error on OS taskkill/kill failure
 		if respKillInvalid.StatusCode != http.StatusInternalServerError {
