@@ -249,8 +249,57 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 type ProcessItem struct {
 	PID     string `json:"pid"`
 	Name    string `json:"name"`
-	Memory  string `json:"memory"`
+	Memory  string `json:"memory,omitempty"`
 	Session string `json:"session,omitempty"`
+	User    string `json:"user,omitempty"`
+	CPU     string `json:"cpu,omitempty"`
+}
+
+// parseProcessList converts raw OS process listings into structured items.
+// Supports macOS/Linux `ps` output and Windows `tasklist /FO CSV /NH`.
+func parseProcessList(raw string, goos string) []ProcessItem {
+	items := []ProcessItem{}
+	if goos == "windows" {
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "\"") {
+				continue
+			}
+			fields := strings.Split(line, "\",\"")
+			if len(fields) < 5 {
+				continue
+			}
+			items = append(items, ProcessItem{
+				Name:    strings.Trim(fields[0], "\""),
+				PID:     strings.Trim(fields[1], "\""),
+				Session: strings.Trim(fields[2], "\""),
+				Memory:  strings.Trim(fields[4], "\""),
+			})
+		}
+		return items
+	}
+
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "PID") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if _, err := strconv.Atoi(fields[0]); err != nil {
+			continue
+		}
+		items = append(items, ProcessItem{
+			PID:    fields[0],
+			User:   fields[1],
+			CPU:    fields[2],
+			Memory: fields[3],
+			Name:   strings.Join(fields[4:], " "),
+		})
+	}
+	return items
 }
 
 func (a *AgentServer) handleProcessList(w http.ResponseWriter, r *http.Request) {
@@ -271,9 +320,10 @@ func (a *AgentServer) handleProcessList(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"os":     runtime.GOOS,
-		"raw":    string(out),
-		"status": "success",
+		"os":        runtime.GOOS,
+		"raw":       string(out),
+		"processes": parseProcessList(string(out), runtime.GOOS),
+		"status":    "success",
 	})
 }
 

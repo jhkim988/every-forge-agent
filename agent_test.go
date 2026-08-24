@@ -453,3 +453,34 @@ func TestHealthEndpointDoesNotExposeToken(t *testing.T) {
 		t.Errorf("Health endpoint should not expose token, got %v", tokenVal)
 	}
 }
+
+func TestParseProcessList(t *testing.T) {
+	psSample := "  PID USER      %CPU %MEM COMMAND\n" +
+		"  375 jinhan    0.0  0.1 /Applications/Safari.app/Contents/MacOS/Safari\n" +
+		"    1 root      0.0  0.0 /sbin/launchd\n"
+	items := parseProcessList(psSample, "darwin")
+	if len(items) != 2 {
+		t.Fatalf("Expected 2 processes from ps output, got %d (%+v)", len(items), items)
+	}
+	if items[0].PID != "375" {
+		t.Errorf("Expected PID 375, got %q", items[0].PID)
+	}
+	if items[0].Name != "/Applications/Safari.app/Contents/MacOS/Safari" {
+		t.Errorf("Expected full command as name, got %q", items[0].Name)
+	}
+
+	csvSample := "\"chrome.exe\",\"1234\",\"Console\",\"1\",\"120,000 K\"\n" +
+		"\"explorer.exe\",\"5678\",\"Console\",\"1\",\"80,000 K\"\n"
+	winItems := parseProcessList(csvSample, "windows")
+	if len(winItems) != 2 {
+		t.Fatalf("Expected 2 processes from tasklist CSV, got %d (%+v)", len(winItems), winItems)
+	}
+	if winItems[0].PID != "1234" || winItems[0].Name != "chrome.exe" || winItems[0].Memory != "120,000 K" {
+		t.Errorf("Unexpected windows process: %+v", winItems[0])
+	}
+
+	// Garbage input yields empty slice, never a panic
+	if got := parseProcessList("", "darwin"); len(got) != 0 {
+		t.Errorf("Expected empty result for empty input, got %+v", got)
+	}
+}
