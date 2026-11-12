@@ -316,3 +316,24 @@ func TestProcessKillSafeDummyProcess(t *testing.T) {
 		t.Errorf("Expected error from terminated process, got nil")
 	}
 }
+
+func TestUnixPSArgsUsesFullCommandArgs(t *testing.T) {
+	args := unixPSArgs()
+	expected := "pid,user,%cpu,%mem,args"
+	if len(args) != 2 || args[0] != "-eo" || args[1] != expected {
+		t.Fatalf("expected unixPSArgs to return [-eo %s], got %v", expected, args)
+	}
+}
+
+func TestParseProcessListWithCommandArgs(t *testing.T) {
+	sample := "  PID USER      %CPU %MEM COMMAND\n" +
+		" 1234 jinhan    1.5  2.0 node /path/to/server.js --port 3000 --env production\n"
+	items := parseProcessList(sample, "darwin")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 process, got %d", len(items))
+	}
+	expectedName := "node /path/to/server.js --port 3000 --env production"
+	if items[0].Name != expectedName {
+		t.Fatalf("expected full command line with flags, got %q", items[0].Name)
+	}
+}

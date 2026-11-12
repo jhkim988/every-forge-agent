@@ -336,6 +336,10 @@ func correlateProcessPorts(items []ProcessItem, portMap map[string][]string) []P
 }
 
 // handleProcessList responds with processes and correlated listening ports.
+func unixPSArgs() []string {
+	return []string{"-eo", "pid,user,%cpu,%mem,args"}
+}
+
 func (a *AgentServer) handleProcessList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -349,7 +353,7 @@ func (a *AgentServer) handleProcessList(w http.ResponseWriter, r *http.Request) 
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "tasklist", "/FO", "CSV", "/NH")
 	} else {
-		cmd = exec.CommandContext(ctx, "ps", "-eo", "pid,user,%cpu,%mem,comm")
+		cmd = exec.CommandContext(ctx, "ps", unixPSArgs()...)
 	}
 
 	out, err := cmd.Output()
