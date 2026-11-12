@@ -21,9 +21,11 @@ var version = "1.0.0"
 const maxProxyResponseBytes = 10 << 20 // 10 MB cap on proxied response bodies
 
 type AgentServer struct {
-	Token         string
-	DevMode       bool
-	MaxProxyBytes int64 // proxy response cap; 0 => default (maxProxyResponseBytes)
+	Token               string
+	DevMode             bool
+	MaxProxyBytes       int64 // proxy response cap; 0 => default (maxProxyResponseBytes)
+	MaxRequestBodyBytes int64 // proxy request body cap; 0 => default (10 << 20)
+	httpClient          *http.Client
 }
 
 func NewAgentServer(token string, devMode bool) *AgentServer {
@@ -34,7 +36,42 @@ func NewAgentServer(token string, devMode bool) *AgentServer {
 		}
 		token = hex.EncodeToString(b)
 	}
-	return &AgentServer{Token: token, DevMode: devMode}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				host = address
+			}
+			ip := net.ParseIP(strings.Trim(host, "[]"))
+			if isBlockedMetadataIP(ip) {
+				return errors.New("connection blocked: target address is cloud metadata")
+			}
+			return nil
+		},
+	}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return &AgentServer{
+		Token:               token,
+		DevMode:             devMode,
+		MaxRequestBodyBytes: 10 << 20,
+		httpClient:          client,
+	}
 }
 
 // public wraps a handler with host and cors middleware.
@@ -94,8 +131,23 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maxReqBytes := a.MaxRequestBodyBytes
+	if maxReqBytes <= 0 {
+		maxReqBytes = 10 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxReqBytes)
+
 	var reqData ProxyRequest
 	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "request body exceeds maximum allowed size",
+			})
+			return
+		}
 		http.Error(w, "Invalid JSON payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -116,39 +168,38 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Defense-in-depth: Socket-level egress guard via net.Dialer.Control to neutralize
-	// DNS rebinding (TOCTOU) attacks at connection time.
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				host = address
-			}
-			ip := net.ParseIP(strings.Trim(host, "[]"))
-			if isBlockedMetadataIP(ip) {
-				return errors.New("connection blocked: target address is cloud metadata")
-			}
-			return nil
-		},
-	}
-
-	// Do not follow redirects: surface the raw redirect back to the caller
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           dialer.DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := a.httpClient
+	if client == nil {
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control: func(network, address string, c syscall.RawConn) error {
+				host, _, err := net.SplitHostPort(address)
+				if err != nil {
+					host = address
+				}
+				ip := net.ParseIP(strings.Trim(host, "[]"))
+				if isBlockedMetadataIP(ip) {
+					return errors.New("connection blocked: target address is cloud metadata")
+				}
+				return nil
+			},
+		}
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           dialer.DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
 	var bodyReader io.Reader

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -505,5 +506,27 @@ func TestVersionIsInjectable(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&data)
 	if data["version"] != "9.9.9-test" {
 		t.Errorf("Expected injected version 9.9.9-test, got %v", data["version"])
+	}
+}
+
+func TestProxyRequestBodyLimit(t *testing.T) {
+	agent := NewAgentServer("test-token", false)
+	agent.MaxRequestBodyBytes = 256
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	oversizedPayload := fmt.Sprintf(`{"url":"http://127.0.0.1:8080","method":"POST","body":"%s"}`, strings.Repeat("A", 512))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/proxy", strings.NewReader(oversizedPayload))
+	req.Header.Set("X-EF-Token", "test-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status 413, got %d", resp.StatusCode)
 	}
 }
