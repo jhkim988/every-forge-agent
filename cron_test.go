@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestIsValidCronSchedule(t *testing.T) {
@@ -406,5 +409,91 @@ func TestCronEndpointsIntegration(t *testing.T) {
 	respBadHost.Body.Close()
 	if respBadHost.StatusCode != http.StatusForbidden {
 		t.Errorf("Expected 403 for non-loopback Host header on /api/cron/list, got %d", respBadHost.StatusCode)
+	}
+}
+
+func TestCronSaveRejectsUnescapedPercent(t *testing.T) {
+	agent := NewAgentServer("test-token-1234", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	// 1. Unescaped % acts as newline in cron daemon -> should be rejected
+	body := `{"schedule":"* * * * *","command":"date +%Y-%m-%d >> /tmp/test.log","comment":"bad percent"}`
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/cron/save", strings.NewReader(body))
+	req.Header.Set("X-EF-Token", "test-token-1234")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for unescaped %% in cron command, got %d", resp.StatusCode)
+	}
+
+	// 2. Escaped \% should pass validation
+	escapedBody := `{"schedule":"* * * * *","command":"date +\\%Y-\\%m-\\%d >> /tmp/test.log","comment":"escaped percent"}`
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/cron/save", strings.NewReader(escapedBody))
+	req2.Header.Set("X-EF-Token", "test-token-1234")
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for escaped \\%% in cron command, got %d", resp2.StatusCode)
+	}
+}
+
+func TestCronConcurrentSaveRace(t *testing.T) {
+	agent := NewAgentServer("test-token-1234", false)
+	var storeMu sync.Mutex
+	crontabContent := ""
+
+	agent.CrontabReadFunc = func() (string, error) {
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		return crontabContent, nil
+	}
+	agent.CrontabWriteFunc = func(content string) error {
+		time.Sleep(2 * time.Millisecond) // amplify race window
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		crontabContent = content
+		return nil
+	}
+
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	const workers = 10
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"schedule":"0 * * * *","command":"/usr/bin/echo job-%d","comment":"job-%d"}`, idx, idx)
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/cron/save", strings.NewReader(body))
+			req.Header.Set("X-EF-Token", "test-token-1234")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("worker %d failed: %v", idx, err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("worker %d failed with status %d", idx, resp.StatusCode)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	jobs := parseCrontab(crontabContent)
+	if len(jobs) != workers {
+		t.Fatalf("expected %d cron jobs after concurrent saves, got %d", workers, len(jobs))
 	}
 }

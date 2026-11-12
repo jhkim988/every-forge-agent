@@ -411,6 +411,9 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.cronMu.Lock()
+	defer a.cronMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
 
 	if runtime.GOOS == "windows" {
@@ -432,7 +435,16 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentRaw, err := readUserCrontab()
+	readFn := a.CrontabReadFunc
+	if readFn == nil {
+		readFn = readUserCrontab
+	}
+	writeFn := a.CrontabWriteFunc
+	if writeFn == nil {
+		writeFn = writeUserCrontab
+	}
+
+	currentRaw, err := readFn()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
@@ -448,7 +460,7 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newRaw := updateCrontabContent(currentRaw, targetJob)
-	if err := writeUserCrontab(newRaw); err != nil {
+	if err := writeFn(newRaw); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
 		return
@@ -504,6 +516,9 @@ func (a *AgentServer) handleCronDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.cronMu.Lock()
+	defer a.cronMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
 
 	if runtime.GOOS == "windows" {
@@ -519,7 +534,16 @@ func (a *AgentServer) handleCronDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentRaw, err := readUserCrontab()
+	readFn := a.CrontabReadFunc
+	if readFn == nil {
+		readFn = readUserCrontab
+	}
+	writeFn := a.CrontabWriteFunc
+	if writeFn == nil {
+		writeFn = writeUserCrontab
+	}
+
+	currentRaw, err := readFn()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
@@ -533,7 +557,7 @@ func (a *AgentServer) handleCronDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := writeUserCrontab(newRaw); err != nil {
+	if err := writeFn(newRaw); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
 		return

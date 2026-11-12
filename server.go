@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -26,6 +27,9 @@ type AgentServer struct {
 	MaxProxyBytes       int64 // proxy response cap; 0 => default (maxProxyResponseBytes)
 	MaxRequestBodyBytes int64 // proxy request body cap; 0 => default (10 << 20)
 	httpClient          *http.Client
+	cronMu              sync.Mutex
+	CrontabReadFunc     func() (string, error)
+	CrontabWriteFunc    func(content string) error
 }
 
 func NewAgentServer(token string, devMode bool) *AgentServer {

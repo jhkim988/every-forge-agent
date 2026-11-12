@@ -484,12 +484,26 @@ func parseValOrName(valStr string, minVal, maxVal int, names []string) (int, boo
 	return v, true
 }
 
+func hasUnescapedPercent(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' {
+			if i == 0 || s[i-1] != '\\' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func validateCronJobInput(req CronSaveRequest) error {
 	if strings.TrimSpace(req.Command) == "" {
 		return errors.New("command cannot be empty")
 	}
 	if strings.ContainsAny(req.Command, "\r\n\x00") {
 		return errors.New("command cannot contain newline or null characters")
+	}
+	if hasUnescapedPercent(req.Command) {
+		return errors.New("cron command must not contain unescaped '%' character (use '\\%' instead)")
 	}
 	if strings.ContainsAny(req.Schedule, "\r\n\x00") {
 		return errors.New("schedule cannot contain newline or null characters")
