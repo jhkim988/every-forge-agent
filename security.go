@@ -135,6 +135,20 @@ func isAllowedOrigin(origin string, isDev bool) bool {
 	return false
 }
 
+func (a *AgentServer) isAuthorized(r *http.Request) bool {
+	if a.Token == "" {
+		return false
+	}
+	token := r.Header.Get("X-EF-Token")
+	if token == "" {
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) == 1
+}
+
 func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.Token == "" {
@@ -146,15 +160,7 @@ func (a *AgentServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		token := r.Header.Get("X-EF-Token")
-		if token == "" {
-			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				token = strings.TrimPrefix(authHeader, "Bearer ")
-			}
-		}
-
-		if subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) != 1 {
+		if !a.isAuthorized(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{

@@ -112,12 +112,13 @@ func (a *AgentServer) Routes() http.Handler {
 func (a *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	data := map[string]interface{}{
-		"status":    "running",
-		"agent":     "every-forge-agent",
-		"version":   version,
-		"os":        runtime.GOOS,
-		"arch":      runtime.GOARCH,
-		"timestamp": time.Now().Unix(),
+		"status":        "running",
+		"agent":         "every-forge-agent",
+		"version":       version,
+		"os":            runtime.GOOS,
+		"arch":          runtime.GOARCH,
+		"timestamp":     time.Now().Unix(),
+		"authenticated": a.isAuthorized(r),
 	}
 	json.NewEncoder(w).Encode(data)
 }

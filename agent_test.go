@@ -530,3 +530,50 @@ func TestProxyRequestBodyLimit(t *testing.T) {
 		t.Fatalf("expected status 413, got %d", resp.StatusCode)
 	}
 }
+
+func TestHealthEndpointAuthenticatedField(t *testing.T) {
+	agent := NewAgentServer("test-token-1234", false)
+	ts := httptest.NewServer(agent.Routes())
+	defer ts.Close()
+
+	// 1. Without token -> authenticated: false
+	req1, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/health", nil)
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("request 1 failed: %v", err)
+	}
+	defer resp1.Body.Close()
+	var data1 map[string]interface{}
+	json.NewDecoder(resp1.Body).Decode(&data1)
+	if data1["authenticated"] != false {
+		t.Fatalf("expected authenticated=false without token, got %v", data1["authenticated"])
+	}
+
+	// 2. With wrong token -> authenticated: false
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/health", nil)
+	req2.Header.Set("X-EF-Token", "wrong-token")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("request 2 failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	var data2 map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&data2)
+	if data2["authenticated"] != false {
+		t.Fatalf("expected authenticated=false with wrong token, got %v", data2["authenticated"])
+	}
+
+	// 3. With valid token -> authenticated: true
+	req3, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/health", nil)
+	req3.Header.Set("X-EF-Token", "test-token-1234")
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("request 3 failed: %v", err)
+	}
+	defer resp3.Body.Close()
+	var data3 map[string]interface{}
+	json.NewDecoder(resp3.Body).Decode(&data3)
+	if data3["authenticated"] != true {
+		t.Fatalf("expected authenticated=true with valid token, got %v", data3["authenticated"])
+	}
+}
