@@ -72,8 +72,8 @@ func TestLocalAgentServer(t *testing.T) {
 		if data["agent"] != "every-forge-agent" {
 			t.Errorf("Expected agent every-forge-agent, got %v", data["agent"])
 		}
-		if data["version"] != "1.0.0" {
-			t.Errorf("Expected version 1.0.0, got %v", data["version"])
+		if data["version"] != version {
+			t.Errorf("Expected version %s, got %v", version, data["version"])
 		}
 		if data["os"] == "" || data["arch"] == "" {
 			t.Errorf("Expected non-empty os and arch telemetry, got os=%v, arch=%v", data["os"], data["arch"])

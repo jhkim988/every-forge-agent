@@ -17,7 +17,7 @@ import (
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".
-var version = "1.0.0"
+var version = "v1.2.0"
 
 const maxProxyResponseBytes = 10 << 20 // 10 MB cap on proxied response bodies
 
@@ -97,9 +97,10 @@ func (a *AgentServer) Routes() http.Handler {
 	// Protected Proxy Endpoint
 	mux.HandleFunc("/api/proxy", a.protected(a.handleProxy))
 
-	// Protected Process Endpoints
+	// Protected Process & Ports Endpoints
 	mux.HandleFunc("/api/process/list", a.protected(a.handleProcessList))
 	mux.HandleFunc("/api/process/kill", a.protected(a.handleProcessKill))
+	mux.HandleFunc("/api/ports/list", a.protected(a.handlePortList))
 
 	// Protected Cron Endpoints
 	mux.HandleFunc("/api/cron/list", a.protected(a.handleCronList))
@@ -265,6 +266,7 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		"statusCode": resp.StatusCode,
 		"statusText": resp.Status,
 		"headers":    respHeaders,
+		"rawHeaders": resp.Header,
 		"body":       string(respBytes),
 		"durationMs": duration,
 		"sizeBytes":  len(respBytes),

@@ -91,10 +91,11 @@ func parseProcessList(raw string, goos string) []ProcessItem {
 	return items
 }
 
-// getListeningPortsByPID executes OS socket inspection commands with a timeout
-// and returns a map from PID to unique, sorted port tags (e.g. ["tcp/3000", "tcp/8080"]).
-func getListeningPortsByPID(goos string) map[string][]string {
+// inspectListeningSockets executes OS socket inspection commands with a timeout
+// and returns both raw command stdout and a map from PID to sorted port tags.
+func inspectListeningSockets(goos string) (string, map[string][]string) {
 	portMap := make(map[string][]string)
+	var rawOut string
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -102,37 +103,67 @@ func getListeningPortsByPID(goos string) map[string][]string {
 	case "windows":
 		cmd := exec.CommandContext(ctx, "netstat", "-ano", "-p", "tcp")
 		if out, err := cmd.Output(); err == nil {
-			parseWindowsNetstatOutput(string(out), portMap)
+			rawOut = string(out)
+			parseWindowsNetstatOutput(rawOut, portMap)
 		}
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP", "-sTCP:LISTEN")
 		if out, err := cmd.Output(); err == nil {
-			parseLsofOutput(string(out), portMap)
+			rawOut = string(out)
+			parseLsofOutput(rawOut, portMap)
 		}
 	case "linux":
 		// 1. Primary: ss -tlnp
 		cmd := exec.CommandContext(ctx, "ss", "-tlnp")
 		if out, err := cmd.Output(); err == nil && len(out) > 0 {
-			parseSsOutput(string(out), portMap)
+			rawOut = string(out)
+			parseSsOutput(rawOut, portMap)
 		}
 		// 2. Fallback to lsof if ss returned nothing
 		if len(portMap) == 0 {
 			cmdLsof := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP", "-sTCP:LISTEN")
 			if outLsof, errLsof := cmdLsof.Output(); errLsof == nil && len(outLsof) > 0 {
-				parseLsofOutput(string(outLsof), portMap)
+				rawOut = string(outLsof)
+				parseLsofOutput(rawOut, portMap)
 			}
 		}
 		// 3. Fallback to netstat if still empty
 		if len(portMap) == 0 {
 			cmdNetstat := exec.CommandContext(ctx, "netstat", "-tlnp")
 			if outNetstat, errNetstat := cmdNetstat.Output(); errNetstat == nil {
-				parseLinuxNetstatOutput(string(outNetstat), portMap)
+				rawOut = string(outNetstat)
+				parseLinuxNetstatOutput(rawOut, portMap)
 			}
 		}
 	}
 
 	sortPortMap(portMap)
+	return rawOut, portMap
+}
+
+// getListeningPortsByPID executes OS socket inspection commands with a timeout
+// and returns a map from PID to unique, sorted port tags (e.g. ["tcp/3000", "tcp/8080"]).
+func getListeningPortsByPID(goos string) map[string][]string {
+	_, portMap := inspectListeningSockets(goos)
 	return portMap
+}
+
+// handlePortList responds with live OS listening socket stdout and PID-to-ports map.
+func (a *AgentServer) handlePortList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	raw, portMap := inspectListeningSockets(runtime.GOOS)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"os":      runtime.GOOS,
+		"raw":     raw,
+		"portMap": portMap,
+	})
 }
 
 // parseLsofOutput parses macOS / Unix `lsof -nP -iTCP -sTCP:LISTEN` stdout.

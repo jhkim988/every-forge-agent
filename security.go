@@ -99,6 +99,7 @@ func (a *AgentServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-EF-Token, Authorization, Access-Control-Request-Private-Network")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "600")
 		// Chrome Private Network Access (PNA) Preflight Support (https -> localhost)
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 
