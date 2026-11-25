@@ -2,15 +2,32 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	cronExecTimeout  = 5 * time.Second
+	maxCronBodyBytes = 64 << 10 // 64 KB cap for cron JSON payloads
+)
+
+var (
+	schtasksRepeatMinRegex  = regexp.MustCompile(`(?i)(\d+)\s*Minute`)
+	schtasksRepeatHourRegex = regexp.MustCompile(`(?i)(\d+)\s*Hour`)
+	schtasksTimeRegex       = regexp.MustCompile(`(\d{1,2}):(\d{2})(?::\d{2})?`)
 )
 
 type CronJob struct {
@@ -108,16 +125,7 @@ func parseCronLineContent(s string, enabled bool, rawLine string, lineNum int) C
 		rest = strings.TrimSpace(s[cur:])
 	}
 
-	command := rest
-	comment := ""
-
-	if idx := strings.Index(rest, " # "); idx != -1 {
-		command = strings.TrimSpace(rest[:idx])
-		comment = strings.TrimSpace(rest[idx+3:])
-	} else if strings.HasPrefix(rest, "#") {
-		command = ""
-		comment = strings.TrimSpace(strings.TrimPrefix(rest, "#"))
-	}
+	command, comment := splitCronCommandAndComment(rest)
 
 	return CronJob{
 		ID:       fmt.Sprintf("line_%d", lineNum),
@@ -127,6 +135,44 @@ func parseCronLineContent(s string, enabled bool, rawLine string, lineNum int) C
 		Enabled:  enabled,
 		Raw:      rawLine,
 	}
+}
+
+// splitCronCommandAndComment splits a crontab command and trailing inline comment
+// on ` # ` (or trailing ` #`), ignoring `#` characters inside single/double quotes.
+func splitCronCommandAndComment(rest string) (string, string) {
+	if strings.HasPrefix(rest, "#") {
+		return "", strings.TrimSpace(strings.TrimPrefix(rest, "#"))
+	}
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(rest); i++ {
+		ch := rest[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if !inSingle && !inDouble && ch == '#' && i > 0 && rest[i-1] == ' ' {
+			if i+1 == len(rest) || rest[i+1] == ' ' {
+				cmd := strings.TrimSpace(rest[:i])
+				cmt := strings.TrimSpace(rest[i+1:])
+				return cmd, cmt
+			}
+		}
+	}
+	return strings.TrimSpace(rest), ""
 }
 
 func formatCronLine(job CronJob) string {
@@ -140,18 +186,32 @@ func formatCronLine(job CronJob) string {
 	return line
 }
 
-func updateCrontabContent(existingRaw string, job CronJob) string {
+func updateCrontabContentChecked(existingRaw string, job CronJob) (string, error) {
 	lines := strings.Split(existingRaw, "\n")
 	newLine := formatCronLine(job)
 
-	lineNum := -1
-	if strings.HasPrefix(job.ID, "line_") {
-		if n, err := strconv.Atoi(strings.TrimPrefix(job.ID, "line_")); err == nil {
-			lineNum = n - 1
+	if strings.TrimSpace(job.ID) != "" {
+		existingJobs := parseCrontab(existingRaw)
+		found := false
+		for _, j := range existingJobs {
+			if j.ID == job.ID {
+				found = true
+				break
+			}
 		}
-	}
+		if !found {
+			return "", fmt.Errorf("cron job %q not found or crontab changed externally; refresh and retry", job.ID)
+		}
 
-	if lineNum >= 0 && lineNum < len(lines) {
+		lineNum := -1
+		if strings.HasPrefix(job.ID, "line_") {
+			if n, err := strconv.Atoi(strings.TrimPrefix(job.ID, "line_")); err == nil {
+				lineNum = n - 1
+			}
+		}
+		if lineNum < 0 || lineNum >= len(lines) {
+			return "", fmt.Errorf("cron job %q out of range; refresh and retry", job.ID)
+		}
 		lines[lineNum] = newLine
 	} else {
 		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
@@ -164,7 +224,21 @@ func updateCrontabContent(existingRaw string, job CronJob) string {
 	if !strings.HasSuffix(result, "\n") {
 		result += "\n"
 	}
-	return result
+	return result, nil
+}
+
+func updateCrontabContent(existingRaw string, job CronJob) string {
+	updated, err := updateCrontabContentChecked(existingRaw, job)
+	if err == nil {
+		return updated
+	}
+	// Preserve legacy fallback behavior for direct unit callers with non-matching IDs
+	lines := strings.Split(existingRaw, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	lines = append(lines, formatCronLine(job))
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func deleteCrontabContent(existingRaw string, id string) (string, error) {
@@ -210,7 +284,9 @@ func deleteCrontabContent(existingRaw string, id string) (string, error) {
 }
 
 func readUserCrontab() (string, error) {
-	cmd := exec.Command("crontab", "-l")
+	ctx, cancel := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "crontab", "-l")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -226,9 +302,19 @@ func readUserCrontab() (string, error) {
 }
 
 func writeUserCrontab(content string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel()
+
 	if strings.TrimSpace(content) == "" {
-		cmd := exec.Command("crontab", "-r")
-		_ = cmd.Run()
+		cmd := exec.CommandContext(ctx, "crontab", "-r")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			if strings.Contains(strings.ToLower(stderr.String()), "no crontab for") {
+				return nil
+			}
+			return fmt.Errorf("crontab -r failed: %v: %s", err, stderr.String())
+		}
 		return nil
 	}
 
@@ -236,7 +322,7 @@ func writeUserCrontab(content string) error {
 		content += "\n"
 	}
 
-	cmd := exec.Command("crontab", "-")
+	cmd := exec.CommandContext(ctx, "crontab", "-")
 	cmd.Stdin = strings.NewReader(content)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -247,7 +333,9 @@ func writeUserCrontab(content string) error {
 }
 
 func readWindowsTasks() ([]CronJob, string, error) {
-	cmd := exec.Command("schtasks", "/Query", "/FO", "CSV", "/V", "/NH")
+	ctx, cancel := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "schtasks", "/Query", "/FO", "CSV", "/V", "/NH")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("schtasks query failed: %v", err)
@@ -269,6 +357,9 @@ func parseSchtasksCSV(raw string) []CronJob {
 
 	for _, rec := range records {
 		if len(rec) < 5 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(rec[0]), "HostName") && strings.EqualFold(strings.TrimSpace(rec[1]), "TaskName") {
 			continue
 		}
 		taskName := strings.Trim(rec[1], "\\")
@@ -299,7 +390,7 @@ func parseSchtasksCSV(raw string) []CronJob {
 
 		jobs = append(jobs, CronJob{
 			ID:       taskName,
-			Schedule: "* * * * *",
+			Schedule: inferCronFromSchtasksRecord(rec),
 			Command:  taskToRun,
 			Comment:  comment,
 			Enabled:  enabled,
@@ -309,32 +400,274 @@ func parseSchtasksCSV(raw string) []CronJob {
 	return jobs
 }
 
-func saveWindowsTask(req CronSaveRequest) error {
-	taskName, err := validateWindowsTaskName(req.ID)
+func inferCronFromSchtasksRecord(rec []string) string {
+	extractHM := func(s string) (int, int, bool) {
+		m := schtasksTimeRegex.FindStringSubmatch(strings.TrimSpace(s))
+		if len(m) < 3 {
+			return 0, 0, false
+		}
+		h, err1 := strconv.Atoi(m[1])
+		min, err2 := strconv.Atoi(m[2])
+		if err1 != nil || err2 != nil || h < 0 || h > 23 || min < 0 || min > 59 {
+			return 0, 0, false
+		}
+		return h, min, true
+	}
+
+	if len(rec) >= 25 {
+		schedType := strings.ToLower(strings.TrimSpace(rec[18]))
+		startTime := strings.TrimSpace(rec[19])
+		daysCol := strings.ToUpper(strings.TrimSpace(rec[22]))
+		repeatCol := strings.TrimSpace(rec[24])
+		h, min, hasHM := extractHM(startTime)
+
+		switch {
+		case strings.Contains(schedType, "start up") || strings.Contains(schedType, "startup") || strings.Contains(schedType, "onstart"):
+			return "@reboot"
+		case strings.Contains(schedType, "minute"):
+			if m := schtasksRepeatMinRegex.FindStringSubmatch(repeatCol); len(m) >= 2 {
+				if n, err := strconv.Atoi(m[1]); err == nil && n > 1 && n <= 59 {
+					return fmt.Sprintf("*/%d * * * *", n)
+				}
+			}
+			return "* * * * *"
+		case strings.Contains(schedType, "hourly"):
+			step := 1
+			if m := schtasksRepeatHourRegex.FindStringSubmatch(repeatCol); len(m) >= 2 {
+				if n, err := strconv.Atoi(m[1]); err == nil && n >= 1 && n <= 23 {
+					step = n
+				}
+			}
+			if step == 1 && (!hasHM || min == 0) {
+				return "@hourly"
+			}
+			if step == 1 {
+				return fmt.Sprintf("%d * * * *", min)
+			}
+			return fmt.Sprintf("%d */%d * * *", min, step)
+		case strings.Contains(schedType, "daily"):
+			if hasHM {
+				return fmt.Sprintf("%d %d * * *", min, h)
+			}
+			return "@daily"
+		case strings.Contains(schedType, "weekly"):
+			dow := "*"
+			if daysCol != "" && daysCol != "N/A" {
+				dow = daysCol
+			}
+			if hasHM {
+				return fmt.Sprintf("%d %d * * %s", min, h, dow)
+			}
+			return "@weekly"
+		case strings.Contains(schedType, "monthly"):
+			dom := "1"
+			if daysCol != "" && daysCol != "N/A" {
+				if _, err := strconv.Atoi(daysCol); err == nil {
+					dom = daysCol
+				}
+			}
+			if hasHM {
+				return fmt.Sprintf("%d %d %s * *", min, h, dom)
+			}
+			return "@monthly"
+		}
+	}
+
+	if len(rec) > 2 {
+		if h, min, ok := extractHM(rec[2]); ok {
+			return fmt.Sprintf("%d %d * * *", min, h)
+		}
+	}
+	return "* * * * *"
+}
+
+func resolveOrGenerateWindowsTaskName(id string) (string, error) {
+	if strings.TrimSpace(id) == "" {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("generate windows task id: %w", err)
+		}
+		return "EF_" + hex.EncodeToString(b), nil
+	}
+	return validateWindowsTaskName(id)
+}
+
+var winDowNames = []string{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"}
+
+func cronDowToWindowsDays(dowField string) (string, bool) {
+	seen := make(map[string]bool)
+	var ordered []string
+	addDay := func(idx int) {
+		name := winDowNames[idx%7]
+		if !seen[name] {
+			seen[name] = true
+			ordered = append(ordered, name)
+		}
+	}
+	parseDay := func(tok string) (int, bool) {
+		up := strings.ToUpper(strings.TrimSpace(tok))
+		for i, name := range winDowNames {
+			if up == name {
+				return i, true
+			}
+		}
+		n, err := strconv.Atoi(up)
+		if err != nil || n < 0 || n > 7 {
+			return 0, false
+		}
+		return n % 7, true
+	}
+
+	for _, part := range strings.Split(dowField, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.Contains(part, "/") {
+			return "", false
+		}
+		if strings.Contains(part, "-") {
+			bounds := strings.Split(part, "-")
+			if len(bounds) != 2 {
+				return "", false
+			}
+			start, ok1 := parseDay(bounds[0])
+			end, ok2 := parseDay(bounds[1])
+			if !ok1 || !ok2 {
+				return "", false
+			}
+			// Preserve raw numeric ordering for ranges like 1-5
+			rawStart, err1 := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			rawEnd, err2 := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err1 == nil && err2 == nil {
+				if rawStart > rawEnd {
+					return "", false
+				}
+				for d := rawStart; d <= rawEnd; d++ {
+					addDay(d)
+				}
+			} else {
+				if start > end {
+					return "", false
+				}
+				for d := start; d <= end; d++ {
+					addDay(d)
+				}
+			}
+		} else {
+			d, ok := parseDay(part)
+			if !ok {
+				return "", false
+			}
+			addDay(d)
+		}
+	}
+	if len(ordered) == 0 {
+		return "", false
+	}
+	return strings.Join(ordered, ","), true
+}
+
+func buildWindowsSchtasksCreateArgs(taskName string, req CronSaveRequest) ([]string, error) {
+	sched := strings.TrimSpace(req.Schedule)
+	lower := strings.ToLower(sched)
+
+	switch lower {
+	case "@reboot":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "ONSTART", "/F"}, nil
+	case "@hourly":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "HOURLY", "/MO", "1", "/ST", "00:00", "/F"}, nil
+	case "@daily", "@midnight":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "DAILY", "/ST", "00:00", "/F"}, nil
+	case "@weekly":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "WEEKLY", "/D", "SUN", "/ST", "00:00", "/F"}, nil
+	case "@monthly":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "MONTHLY", "/D", "1", "/ST", "00:00", "/F"}, nil
+	case "@yearly", "@annually":
+		return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "MONTHLY", "/M", "JAN", "/D", "1", "/ST", "00:00", "/F"}, nil
+	}
+
+	fields := strings.Fields(sched)
+	if len(fields) != 5 {
+		return nil, fmt.Errorf("unsupported schedule for Windows Task Scheduler: %q", req.Schedule)
+	}
+	minF, hourF, domF, monF, dowF := fields[0], fields[1], fields[2], fields[3], fields[4]
+
+	// Minute-interval: "* * * * *" or "*/N * * * *"
+	if hourF == "*" && domF == "*" && monF == "*" && dowF == "*" {
+		if minF == "*" {
+			return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "MINUTE", "/MO", "1", "/F"}, nil
+		}
+		if strings.HasPrefix(minF, "*/") {
+			n, err := strconv.Atoi(strings.TrimPrefix(minF, "*/"))
+			if err == nil && n >= 1 && n <= 59 {
+				return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "MINUTE", "/MO", strconv.Itoa(n), "/F"}, nil
+			}
+		}
+		if m, err := strconv.Atoi(minF); err == nil && m >= 0 && m <= 59 {
+			return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "HOURLY", "/MO", "1", "/ST", fmt.Sprintf("00:%02d", m), "/F"}, nil
+		}
+	}
+
+	// Hourly-interval: "M */N * * *"
+	if m, errM := strconv.Atoi(minF); errM == nil && m >= 0 && m <= 59 && strings.HasPrefix(hourF, "*/") && domF == "*" && monF == "*" && dowF == "*" {
+		n, errN := strconv.Atoi(strings.TrimPrefix(hourF, "*/"))
+		if errN == nil && n >= 1 && n <= 23 {
+			return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "HOURLY", "/MO", strconv.Itoa(n), "/ST", fmt.Sprintf("00:%02d", m), "/F"}, nil
+		}
+	}
+
+	// Fixed minute + fixed hour
+	m, errM := strconv.Atoi(minF)
+	h, errH := strconv.Atoi(hourF)
+	if errM == nil && errH == nil && m >= 0 && m <= 59 && h >= 0 && h <= 23 && monF == "*" {
+		st := fmt.Sprintf("%02d:%02d", h, m)
+		// Daily: M H * * *
+		if domF == "*" && dowF == "*" {
+			return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "DAILY", "/ST", st, "/F"}, nil
+		}
+		// Weekly: M H * * DOW
+		if domF == "*" && dowF != "*" {
+			if winDays, ok := cronDowToWindowsDays(dowF); ok {
+				return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "WEEKLY", "/D", winDays, "/ST", st, "/F"}, nil
+			}
+		}
+		// Monthly: M H DOM * *
+		if domF != "*" && dowF == "*" {
+			if dom, errD := strconv.Atoi(domF); errD == nil && dom >= 1 && dom <= 31 {
+				return []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "MONTHLY", "/D", strconv.Itoa(dom), "/ST", st, "/F"}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("unsupported schedule for Windows Task Scheduler: %q (use @reboot/@hourly/@daily/@weekly/@monthly or standard minute/hourly/daily/weekly/monthly 5-field syntax)", req.Schedule)
+}
+
+func saveWindowsTask(req CronSaveRequest) (string, error) {
+	taskName, err := resolveOrGenerateWindowsTaskName(req.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	args := []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "DAILY", "/ST", "09:00", "/F"}
-	if req.Schedule == "@hourly" {
-		args = []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "HOURLY", "/F"}
-	} else if req.Schedule == "@reboot" {
-		args = []string{"/Create", "/TN", taskName, "/TR", req.Command, "/SC", "ONSTART", "/F"}
+	args, err := buildWindowsSchtasksCreateArgs(taskName, req)
+	if err != nil {
+		return "", err
 	}
 
-	cmd := exec.Command("schtasks", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "schtasks", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("schtasks /Create failed: %v: %s", err, string(out))
+		return "", fmt.Errorf("schtasks /Create failed: %v: %s", err, string(out))
 	}
 
 	changeArg := "/ENABLE"
 	if !req.Enabled {
 		changeArg = "/DISABLE"
 	}
-	cmdChange := exec.Command("schtasks", "/Change", "/TN", taskName, changeArg)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel2()
+	cmdChange := exec.CommandContext(ctx2, "schtasks", "/Change", "/TN", taskName, changeArg)
 	_ = cmdChange.Run()
 
-	return nil
+	return taskName, nil
 }
 
 func deleteWindowsTask(id string) error {
@@ -342,7 +675,9 @@ func deleteWindowsTask(id string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("schtasks", "/Delete", "/TN", taskName, "/F")
+	ctx, cancel := context.WithTimeout(context.Background(), cronExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "schtasks", "/Delete", "/TN", taskName, "/F")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("schtasks /Delete failed: %v: %s", err, string(out))
 	}
@@ -396,9 +731,16 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxCronBodyBytes)
 	var req CronSaveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "request body exceeds maximum allowed size"})
+			return
+		}
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "invalid JSON body: " + err.Error()})
 		return
@@ -417,15 +759,20 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if runtime.GOOS == "windows" {
-		if err := saveWindowsTask(req); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+		taskName, err := saveWindowsTask(req)
+		if err != nil {
+			if strings.Contains(err.Error(), "unsupported schedule") || strings.Contains(err.Error(), "invalid task name") {
+				w.WriteHeader(http.StatusBadRequest)
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
 			json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "success",
 			"job": CronJob{
-				ID:       req.ID,
+				ID:       taskName,
 				Schedule: req.Schedule,
 				Command:  req.Command,
 				Comment:  req.Comment,
@@ -459,7 +806,12 @@ func (a *AgentServer) handleCronSave(w http.ResponseWriter, r *http.Request) {
 		Enabled:  req.Enabled,
 	}
 
-	newRaw := updateCrontabContent(currentRaw, targetJob)
+	newRaw, err := updateCrontabContentChecked(currentRaw, targetJob)
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
+		return
+	}
 	if err := writeFn(newRaw); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": err.Error()})
@@ -496,7 +848,16 @@ func (a *AgentServer) handleCronDelete(w http.ResponseWriter, r *http.Request) {
 
 	var req CronDeleteRequest
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		r.Body = http.MaxBytesReader(w, r.Body, maxCronBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "request body exceeds maximum allowed size"})
+				return
+			}
+		}
 	}
 	if req.ID == "" {
 		req.ID = r.URL.Query().Get("id")

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,20 +51,26 @@ var (
 func parseProcessList(raw string, goos string) []ProcessItem {
 	items := []ProcessItem{}
 	if goos == "windows" {
-		for _, line := range strings.Split(raw, "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "\"") {
+		r := csv.NewReader(strings.NewReader(raw))
+		r.FieldsPerRecord = -1
+		r.LazyQuotes = true
+		records, err := r.ReadAll()
+		if err != nil {
+			return items
+		}
+		for _, rec := range records {
+			if len(rec) < 5 {
 				continue
 			}
-			fields := strings.Split(line, "\",\"")
-			if len(fields) < 5 {
+			pidStr := strings.TrimSpace(rec[1])
+			if pidNum, err := strconv.Atoi(pidStr); err != nil || pidNum < 0 {
 				continue
 			}
 			items = append(items, ProcessItem{
-				Name:    strings.Trim(fields[0], "\""),
-				PID:     strings.Trim(fields[1], "\""),
-				Session: strings.Trim(fields[2], "\""),
-				Memory:  strings.Trim(fields[4], "\""),
+				Name:    strings.TrimSpace(rec[0]),
+				PID:     pidStr,
+				Session: strings.TrimSpace(rec[2]),
+				Memory:  strings.TrimSpace(rec[4]),
 			})
 		}
 		return items
@@ -177,15 +185,34 @@ func parseLsofOutput(raw string, portMap map[string][]string) {
 		if len(fields) < 9 {
 			continue
 		}
-		pid := fields[1]
-		if _, err := strconv.Atoi(pid); err != nil {
+
+		// Reverse-index from trailing "(LISTEN)" when present so spaces in COMMAND or USER don't shift address/proto columns.
+		addrField := fields[8]
+		protoField := fields[7]
+		if fields[len(fields)-1] == "(LISTEN)" && len(fields) >= 10 {
+			addrField = fields[len(fields)-2]
+			protoField = fields[len(fields)-3]
+		}
+
+		// Locate PID: normally fields[1], or scan forward if COMMAND contained unescaped spaces.
+		pid := ""
+		if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+			pid = fields[1]
+		} else if len(fields) >= 10 {
+			maxPidIdx := len(fields) - 8
+			for i := 2; i <= maxPidIdx; i++ {
+				if n, err := strconv.Atoi(fields[i]); err == nil && n > 0 {
+					pid = fields[i]
+					break
+				}
+			}
+		}
+		if pid == "" {
 			continue
 		}
 
-		// fields[7] is PROTO (TCP), fields[8] is NAME/address, fields[9] is (LISTEN)
-		addrField := fields[8]
 		proto := "tcp"
-		if len(fields) > 7 && strings.HasPrefix(strings.ToLower(fields[7]), "tcp") {
+		if strings.HasPrefix(strings.ToLower(protoField), "tcp") {
 			proto = "tcp"
 		}
 
@@ -425,7 +452,9 @@ func (a *AgentServer) handleProcessKill(w http.ResponseWriter, r *http.Request) 
 	if r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 		if len(bodyBytes) > 0 {
-			_ = json.Unmarshal(bodyBytes, &reqData)
+			dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+			dec.UseNumber()
+			_ = dec.Decode(&reqData)
 		}
 	}
 
@@ -433,8 +462,10 @@ func (a *AgentServer) handleProcessKill(w http.ResponseWriter, r *http.Request) 
 	switch v := reqData.PID.(type) {
 	case string:
 		pidStr = strings.TrimSpace(v)
+	case json.Number:
+		pidStr = strings.TrimSpace(v.String())
 	case float64:
-		pidStr = strconv.Itoa(int(v))
+		pidStr = strconv.FormatFloat(v, 'f', -1, 64)
 	case int:
 		pidStr = strconv.Itoa(v)
 	}

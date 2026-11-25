@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,15 +10,17 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=vX.Y.Z".
-var version = "v1.2.0"
+var version = "v1.2.1"
 
 const maxProxyResponseBytes = 10 << 20 // 10 MB cap on proxied response bodies
 
@@ -32,14 +35,7 @@ type AgentServer struct {
 	CrontabWriteFunc    func(content string) error
 }
 
-func NewAgentServer(token string, devMode bool) *AgentServer {
-	if token == "" {
-		b := make([]byte, 16)
-		if _, err := rand.Read(b); err != nil {
-			panic("failed to generate random token: " + err.Error())
-		}
-		token = hex.EncodeToString(b)
-	}
+func newSafeProxyHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -55,10 +51,10 @@ func NewAgentServer(token string, devMode bool) *AgentServer {
 			return nil
 		},
 	}
-	client := &http.Client{
+	return &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 nil, // direct egress only so dialer.Control always inspects destination IP
 			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
@@ -70,11 +66,28 @@ func NewAgentServer(token string, devMode bool) *AgentServer {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+func (a *AgentServer) proxyHTTPClient() *http.Client {
+	if a.httpClient != nil {
+		return a.httpClient
+	}
+	return newSafeProxyHTTPClient()
+}
+
+func NewAgentServer(token string, devMode bool) *AgentServer {
+	if token == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			panic("failed to generate random token: " + err.Error())
+		}
+		token = hex.EncodeToString(b)
+	}
 	return &AgentServer{
 		Token:               token,
 		DevMode:             devMode,
 		MaxRequestBodyBytes: 10 << 20,
-		httpClient:          client,
+		httpClient:          newSafeProxyHTTPClient(),
 	}
 }
 
@@ -163,6 +176,17 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		method = "GET"
 	}
 
+	parsedTarget, parseErr := url.Parse(strings.TrimSpace(reqData.URL))
+	if parseErr != nil || (!strings.EqualFold(parsedTarget.Scheme, "http") && !strings.EqualFold(parsedTarget.Scheme, "https")) || parsedTarget.Hostname() == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     "invalid target URL: scheme must be http or https",
+			"targetURL": reqData.URL,
+		})
+		return
+	}
+
 	// Egress guard: never proxy to cloud instance metadata endpoints.
 	if isBlockedProxyTarget(reqData.URL) {
 		w.Header().Set("Content-Type", "application/json")
@@ -174,46 +198,14 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := a.httpClient
-	if client == nil {
-		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-			Control: func(network, address string, c syscall.RawConn) error {
-				host, _, err := net.SplitHostPort(address)
-				if err != nil {
-					host = address
-				}
-				ip := net.ParseIP(strings.Trim(host, "[]"))
-				if isBlockedMetadataIP(ip) {
-					return errors.New("connection blocked: target address is cloud metadata")
-				}
-				return nil
-			},
-		}
-		client = &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				DialContext:           dialer.DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-	}
+	client := a.proxyHTTPClient()
 
 	var bodyReader io.Reader
 	if reqData.Body != "" {
 		bodyReader = strings.NewReader(reqData.Body)
 	}
 
-	outReq, err := http.NewRequest(method, reqData.URL, bodyReader)
+	outReq, err := http.NewRequestWithContext(r.Context(), method, reqData.URL, bodyReader)
 	if err != nil {
 		http.Error(w, "Failed to create target request: "+err.Error(), http.StatusBadRequest)
 		return
@@ -244,12 +236,23 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if a.MaxProxyBytes > 0 {
 		limit = a.MaxProxyBytes
 	}
-	respBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
-	if readErr == nil && int64(len(respBytes)) > limit {
+	respBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	duration = time.Since(start).Milliseconds()
+	if int64(len(respBytes)) > limit {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":      fmt.Sprintf("response body too large (limit %d bytes)", limit),
+			"durationMs": duration,
+			"targetURL":  reqData.URL,
+		})
+		return
+	}
+	if readErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      "failed to read upstream response body: " + readErr.Error(),
 			"durationMs": duration,
 			"targetURL":  reqData.URL,
 		})
@@ -261,14 +264,27 @@ func (a *AgentServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		respHeaders[k] = strings.Join(v, ", ")
 	}
 
+	bodyEncoding := "utf-8"
+	bodyBase64 := ""
+	if !utf8.Valid(respBytes) {
+		bodyEncoding = "base64"
+		bodyBase64 = base64.StdEncoding.EncodeToString(respBytes)
+	}
+
+	payload := map[string]interface{}{
+		"statusCode":   resp.StatusCode,
+		"statusText":   resp.Status,
+		"headers":      respHeaders,
+		"rawHeaders":   resp.Header,
+		"body":         string(respBytes),
+		"bodyEncoding": bodyEncoding,
+		"durationMs":   duration,
+		"sizeBytes":    len(respBytes),
+	}
+	if bodyBase64 != "" {
+		payload["bodyBase64"] = bodyBase64
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"statusCode": resp.StatusCode,
-		"statusText": resp.Status,
-		"headers":    respHeaders,
-		"rawHeaders": resp.Header,
-		"body":       string(respBytes),
-		"durationMs": duration,
-		"sizeBytes":  len(respBytes),
-	})
+	json.NewEncoder(w).Encode(payload)
 }

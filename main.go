@@ -68,10 +68,13 @@ func main() {
 	fmt.Println("  Ready. Press Ctrl+C to terminate.")
 
 	server := &http.Server{
-		Addr:         "127.0.0.1:" + port,
-		Handler:      agent.Routes(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 35 * time.Second,
+		Addr:              "127.0.0.1:" + port,
+		Handler:           agent.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM

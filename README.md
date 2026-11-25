@@ -74,19 +74,25 @@ MIT License © 2026 Every-Forge Team.
 
 The web app at every-forge.com communicates with this agent over `http://127.0.0.1:9921`.
 
-1. Start the agent — it prints a random 32-char security token in the console.
-2. Paste that token into the agent pairing UI on every-forge.com.
+1. Start the agent — it loads or creates a persistent 32-char hex security token at `~/.every-forge/agent.token` (`0600`) and prints a **1-Click Pair URL** (`https://every-forge.com/download#pair=<token>`) in the console.
+   - Use `-rotate-token` to regenerate and persist a fresh token.
+   - Use `-ephemeral` for a one-time in-memory token without writing to disk.
+2. Open the 1-Click Pair URL (which auto-pairs and immediately scrubs `#pair=` from the address bar via `history.replaceState`), or paste the token manually into the pairing UI on every-forge.com/download.
 3. The site stores the token locally and sends it as `X-EF-Token` (or `Authorization: Bearer`) on every call.
 
 ### Endpoints
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/health` | none | Liveness, version, OS/arch info |
-| `POST /api/proxy` | token | Server-side HTTP request from your machine (response capped at 10 MB, redirects are NOT followed) |
-| `GET /api/process/list` | token | Structured process list (`processes[]`) + raw output |
-| `POST /api/process/kill?pid=` | token | Kill process by numeric PID (validated: positive integer only) |
+| `GET /api/health` | optional | Liveness, version, OS/arch info, and `authenticated` boolean when `X-EF-Token` is sent |
+| `POST /api/proxy` | token | Direct OS-socket HTTP(S) request (10 MB response cap, redirects NOT followed, binary-safe `bodyBase64` + `rawHeaders`) |
+| `GET /api/process/list` | token | Structured process list (`processes[]`) with correlated listening ports + raw output |
+| `POST /api/process/kill` | token | Terminate process by positive integer PID (`SIGTERM`/`SIGKILL`; rejects PID 1, self PID, and fractional numbers) |
+| `GET /api/ports/list` | token | Live OS listening TCP sockets (`lsof` / `ss` / `netstat`) as raw output + PID-to-ports map |
+| `GET /api/cron/list` | token | Read local user crontab (Unix) or `EF_*` Windows Scheduled Tasks |
+| `POST /api/cron/save` | token | Add or update a local cron job / Windows Scheduled Task (with stale-line conflict guard and 5s exec timeout) |
+| `POST /api/cron/delete` | token | Delete a local cron job by `line_N` ID or `EF_*` Windows task name |
 
-Security: loopback binding only, strict origin whitelist (403 otherwise), random per-run token.
+Security: loopback binding only, strict origin whitelist (403 otherwise), persistent `0600` token (or `-ephemeral`), direct egress without env proxy bypass.
 
 ### Request Hardening (defense in depth)
 

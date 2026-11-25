@@ -154,3 +154,50 @@ func TestEchoServer(t *testing.T) {
 		}
 	})
 }
+
+func TestEchoServer_BodySizeLimit413(t *testing.T) {
+	ts := httptest.NewServer(EchoRouter())
+	defer ts.Close()
+
+	oversized := strings.Repeat("X", (1<<20)+1024)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/echo", strings.NewReader(oversized))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST oversized failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Request Entity Too Large for >1MB echo body, got %d", resp.StatusCode)
+	}
+}
+
+func TestEchoServer_RejectsNonLoopbackHost(t *testing.T) {
+	ts := httptest.NewServer(EchoRouter())
+	defer ts.Close()
+
+	reqBad, _ := http.NewRequest(http.MethodGet, ts.URL+"/echo", nil)
+	reqBad.Host = "evil.rebinder.com:9922"
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	respBad.Body.Close()
+	if respBad.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for non-loopback Host header, got %d", respBad.StatusCode)
+	}
+
+	for _, goodHost := range []string{"127.0.0.1:9922", "localhost:9922", "[::1]:9922"} {
+		reqOK, _ := http.NewRequest(http.MethodGet, ts.URL+"/echo", nil)
+		reqOK.Host = goodHost
+		respOK, err := http.DefaultClient.Do(reqOK)
+		if err != nil {
+			t.Fatalf("request for %s failed: %v", goodHost, err)
+		}
+		respOK.Body.Close()
+		if respOK.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK for loopback Host %q, got %d", goodHost, respOK.StatusCode)
+		}
+	}
+}

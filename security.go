@@ -352,6 +352,10 @@ func isBlockedProxyTarget(rawURL string) bool {
 	if err != nil {
 		return true // fail-closed on invalid URLs
 	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return true
+	}
 	host := strings.TrimSpace(u.Hostname())
 	if host == "" {
 		return true
@@ -526,6 +530,9 @@ func validateCronJobInput(req CronSaveRequest) error {
 
 func validateWindowsTaskName(name string) (string, error) {
 	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "EF_") {
+		return "", errors.New("invalid task name: task name cannot be empty")
+	}
 	if !strings.HasPrefix(name, "EF_") {
 		name = "EF_" + name
 	}
